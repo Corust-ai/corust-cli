@@ -1,67 +1,109 @@
+use std::time::Instant;
+
 use agent_client_protocol::{PermissionOption, ToolCallContent, ToolCallId};
 use futures::channel::oneshot;
+use unicode_width::UnicodeWidthStr;
 
 use crate::event::{Event, PermissionResponse};
 
-/// The TUI application model (TEA: Model).
-///
-/// All mutable state lives here. The `update` methods take events and
-/// mutate the model; the `ui` module reads it to produce frames.
-pub struct App {
-    /// Current text in the input bar.
-    pub input: String,
-    /// Cursor byte-position within `input`.
-    pub cursor: usize,
-    /// Conversation blocks displayed in the scroll area.
-    pub blocks: Vec<Block>,
-    /// Vertical scroll offset (0 = bottom / latest).
-    pub scroll_offset: u16,
-    /// Whether the app should quit on the next loop iteration.
-    pub should_quit: bool,
-    /// Whether a prompt is currently being processed by the agent.
-    pub busy: bool,
-    /// Status bar info.
-    pub status: StatusBar,
-    /// Pending permission request (if any).
-    pub pending_permission: Option<PendingPermission>,
-    /// Input history for up/down recall.
-    pub history: Vec<String>,
-    /// Current position in history (None = editing new input).
-    pub history_cursor: Option<usize>,
-    /// Stashed input when browsing history.
-    pub history_stash: String,
-    /// Slash command completion candidates (shown when input starts with /).
-    pub completions: Vec<&'static str>,
-    /// Current completion selection index.
-    pub completion_idx: Option<usize>,
+// ---------------------------------------------------------------------------
+// Spinner
+// ---------------------------------------------------------------------------
+
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+pub struct Spinner {
+    start: Instant,
 }
 
-/// Built-in slash commands.
-pub const SLASH_COMMANDS: &[&str] = &[
-    "/clear",
-    "/exit",
-    "/model",
-    "/quit",
-    "/undo",
-];
+impl Spinner {
+    pub fn new() -> Self {
+        Self {
+            start: Instant::now(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.start = Instant::now();
+    }
+
+    pub fn frame(&self) -> &'static str {
+        let elapsed_ms = self.start.elapsed().as_millis() as usize;
+        let idx = (elapsed_ms / 80) % SPINNER_FRAMES.len();
+        SPINNER_FRAMES[idx]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scroll state
+// ---------------------------------------------------------------------------
+
+pub struct ScrollState {
+    offset: u16,
+    content_height: u16,
+    viewport_height: u16,
+    pub pending_auto_scroll: bool,
+}
+
+impl ScrollState {
+    fn new() -> Self {
+        Self {
+            offset: 0,
+            content_height: 0,
+            viewport_height: 0,
+            pending_auto_scroll: true,
+        }
+    }
+
+    pub fn update_dimensions(&mut self, content_height: u16, viewport_height: u16) {
+        self.content_height = content_height;
+        self.viewport_height = viewport_height;
+
+        if self.pending_auto_scroll {
+            self.offset = self.max_offset();
+            self.pending_auto_scroll = false;
+        }
+        self.clamp();
+    }
+
+    pub fn offset(&self) -> u16 {
+        self.offset
+    }
+
+    pub fn scroll_up(&mut self, n: u16) {
+        self.offset = self.offset.saturating_sub(n);
+        self.pending_auto_scroll = false;
+    }
+
+    pub fn scroll_down(&mut self, n: u16) {
+        self.offset = self.offset.saturating_add(n);
+        self.clamp();
+        self.pending_auto_scroll = false;
+    }
+
+    pub fn request_auto_scroll(&mut self) {
+        self.pending_auto_scroll = true;
+    }
+
+    fn max_offset(&self) -> u16 {
+        self.content_height.saturating_sub(self.viewport_height)
+    }
+
+    fn clamp(&mut self) {
+        self.offset = self.offset.min(self.max_offset());
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Block model
 // ---------------------------------------------------------------------------
 
 /// A single visual unit in the conversation scroll area.
-#[allow(dead_code)] // P1 variants constructed when ACP events are wired.
+#[allow(dead_code)]
 pub enum Block {
-    /// User's submitted input.
     UserInput { text: String },
-
-    /// Agent's streamed text response (accumulates chunks).
     AgentText { content: String, streaming: bool },
-
-    /// Agent's internal reasoning (collapsible).
     Thinking { content: String, collapsed: bool },
-
-    /// Tool invocation with structured output.
     ToolCall {
         id: ToolCallId,
         title: String,
@@ -69,34 +111,24 @@ pub enum Block {
         locations: Vec<String>,
         output: Option<String>,
     },
-
-    /// Fenced code block extracted from agent response.
     CodeBlock { lang: String, code: String },
-
-    /// Unified diff for file edits.
     Diff { path: String, lines: Vec<DiffLine> },
-
-    /// System notification.
     System { message: String },
-
-    /// Permission request (rendered inline).
     PermissionRequest { title: String, resolved: Option<String> },
-
-    // --- P1 ---
-
-    /// Agent asks a clarifying question, optionally with choices.
     AgentQuestion { question: String, options: Vec<String> },
-
-    /// Background sub-agent task progress.
     BackgroundTask { id: String, name: String, status: TaskStatus },
-
-    /// File snapshot before edit; supports /undo.
     Checkpoint { path: String, content: String, restored: bool },
 }
 
-/// Status of a background task.
+#[allow(dead_code)]
+pub enum DiffLine {
+    Context(String),
+    Add(String),
+    Remove(String),
+}
+
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // Used once ACP background task events are wired.
+#[allow(dead_code)]
 pub enum TaskStatus {
     Queued,
     Running,
@@ -104,44 +136,69 @@ pub enum TaskStatus {
     Failed,
 }
 
-/// A single line within a diff block.
-#[allow(dead_code)] // Context variant used with proper diff algorithms.
-pub enum DiffLine {
-    Context(String),
-    Add(String),
-    Remove(String),
-}
-
 // ---------------------------------------------------------------------------
 // Supporting types
 // ---------------------------------------------------------------------------
 
-/// A pending permission request awaiting user decision.
 pub struct PendingPermission {
     pub options: Vec<PermissionOption>,
     pub respond: oneshot::Sender<PermissionResponse>,
 }
 
-/// Static metadata shown in the status bar.
 pub struct StatusBar {
     pub model: String,
     pub cwd: String,
     pub git_branch: Option<String>,
+    pub turn_count: usize,
 }
 
+/// Result of a slash command.
+pub enum SlashResult {
+    Handled,
+}
+
+/// Built-in slash commands.
+pub const SLASH_COMMANDS: &[&str] = &["/clear", "/exit", "/model", "/quit", "/undo"];
+
 // ---------------------------------------------------------------------------
-// App implementation
+// App
 // ---------------------------------------------------------------------------
+
+pub struct App {
+    // Input
+    pub input: String,
+    pub input_cursor: usize,
+
+    // Conversation
+    pub blocks: Vec<Block>,
+    pub scroll: ScrollState,
+
+    // State
+    pub should_quit: bool,
+    pub busy: bool,
+    pub status: StatusBar,
+    pub spinner: Spinner,
+    pub pending_permission: Option<PendingPermission>,
+
+    // History
+    pub history: Vec<String>,
+    pub history_cursor: Option<usize>,
+    pub history_stash: String,
+
+    // Slash completion
+    pub completions: Vec<&'static str>,
+    pub completion_idx: Option<usize>,
+}
 
 impl App {
     pub fn new() -> Self {
         Self {
             input: String::new(),
-            cursor: 0,
+            input_cursor: 0,
             blocks: vec![Block::System {
                 message: "Welcome to corust. Type a message and press Enter.".into(),
             }],
-            scroll_offset: 0,
+            scroll: ScrollState::new(),
             should_quit: false,
             busy: false,
             status: StatusBar {
@@ -150,7 +207,9 @@ impl App {
                     .map(|p| p.display().to_string())
                     .unwrap_or_default(),
                 git_branch: None,
+                turn_count: 0,
             },
+            spinner: Spinner::new(),
             pending_permission: None,
             history: Vec::new(),
             history_cursor: None,
@@ -160,7 +219,9 @@ impl App {
         }
     }
 
-    // -- ACP event handling --
+    // -----------------------------------------------------------------------
+    // ACP event handling
+    // -----------------------------------------------------------------------
 
     pub fn handle_acp_event(&mut self, event: Event) {
         match event {
@@ -173,8 +234,7 @@ impl App {
                         streaming: true,
                     });
                 }
-                split_code_blocks(&mut self.blocks);
-                self.scroll_offset = 0;
+                self.scroll.request_auto_scroll();
             }
             Event::AgentThought(text) => {
                 if let Some(Block::Thinking { content, .. }) = self.blocks.last_mut() {
@@ -185,10 +245,9 @@ impl App {
                         collapsed: false,
                     });
                 }
-                self.scroll_offset = 0;
+                self.scroll.request_auto_scroll();
             }
             Event::ToolCallStarted(tool_call) => {
-                // Format locations as "path:line" strings.
                 let locations: Vec<String> = tool_call
                     .locations
                     .iter()
@@ -200,10 +259,7 @@ impl App {
                         }
                     })
                     .collect();
-
-                // Extract text output from content.
                 let output = extract_text_content(&tool_call.content);
-
                 self.blocks.push(Block::ToolCall {
                     id: tool_call.tool_call_id.clone(),
                     title: tool_call.title.clone(),
@@ -211,20 +267,14 @@ impl App {
                     locations,
                     output,
                 });
-
-                // Extract diffs as separate Diff blocks.
                 extract_diff_blocks(&tool_call.content, &mut self.blocks);
-
-                self.scroll_offset = 0;
+                self.scroll.request_auto_scroll();
             }
             Event::ToolCallUpdated(update) => {
                 let target_id = &update.tool_call_id;
-
-                // Find the matching ToolCall block by ID.
                 let tool_block = self.blocks.iter_mut().rev().find(|b| {
                     matches!(b, Block::ToolCall { id, .. } if id == target_id)
                 });
-
                 if let Some(Block::ToolCall {
                     title,
                     status,
@@ -232,11 +282,11 @@ impl App {
                     ..
                 }) = tool_block
                 {
-                    if let Some(new_title) = &update.fields.title {
-                        *title = new_title.clone();
+                    if let Some(t) = &update.fields.title {
+                        *title = t.clone();
                     }
-                    if let Some(new_status) = &update.fields.status {
-                        *status = format!("{new_status:?}");
+                    if let Some(s) = &update.fields.status {
+                        *status = format!("{s:?}");
                     }
                     if let Some(content) = &update.fields.content {
                         if let Some(text) = extract_text_content(content) {
@@ -245,7 +295,7 @@ impl App {
                         extract_diff_blocks(content, &mut self.blocks);
                     }
                 }
-                self.scroll_offset = 0;
+                self.scroll.request_auto_scroll();
             }
             Event::PermissionRequest {
                 tool_call,
@@ -263,7 +313,7 @@ impl App {
                     resolved: None,
                 });
                 self.pending_permission = Some(PendingPermission { options, respond });
-                self.scroll_offset = 0;
+                self.scroll.request_auto_scroll();
             }
             Event::SessionStarted {
                 agent_name,
@@ -275,18 +325,20 @@ impl App {
                 self.blocks.push(Block::System {
                     message: format!("Session started: {label} ({})", session_id.0),
                 });
-                self.scroll_offset = 0;
+                self.scroll.request_auto_scroll();
             }
             Event::Error(msg) => {
                 self.blocks.push(Block::System {
                     message: format!("Error: {msg}"),
                 });
-                self.scroll_offset = 0;
+                self.scroll.request_auto_scroll();
             }
         }
     }
 
-    // -- Permission --
+    // -----------------------------------------------------------------------
+    // Permission
+    // -----------------------------------------------------------------------
 
     pub fn resolve_permission(&mut self, idx: usize) {
         if let Some(perm) = self.pending_permission.take() {
@@ -295,14 +347,12 @@ impl App {
                 .get(idx)
                 .map(|o| o.name.clone())
                 .unwrap_or_else(|| "cancelled".into());
-
             for block in self.blocks.iter_mut().rev() {
                 if let Block::PermissionRequest { resolved, .. } = block {
                     *resolved = Some(label.clone());
                     break;
                 }
             }
-
             if idx < perm.options.len() {
                 let _ = perm.respond.send(PermissionResponse::Selected(idx));
             } else {
@@ -323,11 +373,13 @@ impl App {
         }
     }
 
-    // -- Turn lifecycle --
+    // -----------------------------------------------------------------------
+    // Turn lifecycle
+    // -----------------------------------------------------------------------
 
     pub fn turn_finished(&mut self) {
         self.busy = false;
-        // Mark the last AgentText as done streaming.
+        self.status.turn_count += 1;
         for block in self.blocks.iter_mut().rev() {
             if let Block::AgentText { streaming, .. } = block {
                 *streaming = false;
@@ -336,10 +388,11 @@ impl App {
         }
     }
 
-    // -- Thinking toggle --
+    // -----------------------------------------------------------------------
+    // Thinking toggle
+    // -----------------------------------------------------------------------
 
     pub fn toggle_thinking(&mut self) {
-        // Toggle the most recent Thinking block.
         for block in self.blocks.iter_mut().rev() {
             if let Block::Thinking { collapsed, .. } = block {
                 *collapsed = !*collapsed;
@@ -348,24 +401,135 @@ impl App {
         }
     }
 
-    // -- Input editing --
+    // -----------------------------------------------------------------------
+    // Multi-line input (ported from corust-agent-rs)
+    // -----------------------------------------------------------------------
 
     pub fn insert_char(&mut self, c: char) {
-        self.input.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
+        self.input.insert(self.input_cursor, c);
+        self.input_cursor += c.len_utf8();
     }
 
-    pub fn delete_char_before_cursor(&mut self) {
-        if self.cursor > 0 {
-            let prev = self.input[..self.cursor]
+    pub fn insert_newline(&mut self) {
+        self.insert_char('\n');
+    }
+
+    pub fn backspace(&mut self) {
+        if self.input_cursor > 0 {
+            let prev = self.input[..self.input_cursor]
                 .char_indices()
                 .next_back()
                 .map(|(i, _)| i)
                 .unwrap_or(0);
-            self.input.drain(prev..self.cursor);
-            self.cursor = prev;
+            self.input.drain(prev..self.input_cursor);
+            self.input_cursor = prev;
         }
     }
+
+    pub fn delete_at_cursor(&mut self) {
+        if self.input_cursor < self.input.len() {
+            let next = self.input[self.input_cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.input_cursor + i)
+                .unwrap_or(self.input.len());
+            self.input.drain(self.input_cursor..next);
+        }
+    }
+
+    pub fn cursor_left(&mut self) {
+        if self.input_cursor > 0 {
+            self.input_cursor = self.input[..self.input_cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+        }
+    }
+
+    pub fn cursor_right(&mut self) {
+        if self.input_cursor < self.input.len() {
+            self.input_cursor = self.input[self.input_cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.input_cursor + i)
+                .unwrap_or(self.input.len());
+        }
+    }
+
+    pub fn cursor_home(&mut self) {
+        let line_start = self.input[..self.input_cursor]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        self.input_cursor = line_start;
+    }
+
+    pub fn cursor_end(&mut self) {
+        let line_end = self.input[self.input_cursor..]
+            .find('\n')
+            .map(|i| self.input_cursor + i)
+            .unwrap_or(self.input.len());
+        self.input_cursor = line_end;
+    }
+
+    pub fn cursor_up(&mut self) {
+        let (row, col) = self.cursor_row_col();
+        if row > 0 {
+            self.set_cursor_row_col(row - 1, col);
+        }
+    }
+
+    pub fn cursor_down(&mut self) {
+        let (row, col) = self.cursor_row_col();
+        let line_count = self.input_line_count();
+        if row + 1 < line_count {
+            self.set_cursor_row_col(row + 1, col);
+        }
+    }
+
+    pub fn clear_input(&mut self) {
+        self.input.clear();
+        self.input_cursor = 0;
+    }
+
+    pub fn input_line_count(&self) -> usize {
+        self.input.split('\n').count().max(1)
+    }
+
+    /// (row, col) from byte cursor — col in display-width units.
+    pub fn cursor_row_col(&self) -> (usize, usize) {
+        let before = &self.input[..self.input_cursor];
+        let row = before.matches('\n').count();
+        let last_line = before.rsplit('\n').next().unwrap_or(before);
+        let col = UnicodeWidthStr::width(last_line);
+        (row, col)
+    }
+
+    fn set_cursor_row_col(&mut self, target_row: usize, target_col: usize) {
+        let mut offset = 0;
+        for (i, line) in self.input.split('\n').enumerate() {
+            if i == target_row {
+                let mut col_width = 0;
+                let mut byte_col = 0;
+                for ch in line.chars() {
+                    let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if col_width + w > target_col {
+                        break;
+                    }
+                    col_width += w;
+                    byte_col += ch.len_utf8();
+                }
+                self.input_cursor = offset + byte_col;
+                return;
+            }
+            offset += line.len() + 1;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Submit
+    // -----------------------------------------------------------------------
 
     pub fn submit_input(&mut self) -> Option<String> {
         let text = self.input.trim().to_string();
@@ -377,12 +541,14 @@ impl App {
         self.history_stash.clear();
         self.blocks.push(Block::UserInput { text: text.clone() });
         self.input.clear();
-        self.cursor = 0;
-        self.scroll_offset = 0;
+        self.input_cursor = 0;
+        self.scroll.request_auto_scroll();
         Some(text)
     }
 
-    // -- History navigation --
+    // -----------------------------------------------------------------------
+    // History
+    // -----------------------------------------------------------------------
 
     pub fn history_prev(&mut self) {
         if self.history.is_empty() {
@@ -390,34 +556,33 @@ impl App {
         }
         let idx = match self.history_cursor {
             None => {
-                // Entering history: stash current input.
                 self.history_stash = self.input.clone();
                 self.history.len() - 1
             }
-            Some(0) => return, // already at oldest
+            Some(0) => return,
             Some(i) => i - 1,
         };
         self.history_cursor = Some(idx);
         self.input = self.history[idx].clone();
-        self.cursor = self.input.len();
+        self.input_cursor = self.input.len();
     }
 
     pub fn history_next(&mut self) {
         let Some(idx) = self.history_cursor else { return };
         if idx + 1 >= self.history.len() {
-            // Back to current input.
             self.history_cursor = None;
             self.input = std::mem::take(&mut self.history_stash);
         } else {
             self.history_cursor = Some(idx + 1);
             self.input = self.history[idx + 1].clone();
         }
-        self.cursor = self.input.len();
+        self.input_cursor = self.input.len();
     }
 
-    // -- Slash command completion --
+    // -----------------------------------------------------------------------
+    // Slash commands
+    // -----------------------------------------------------------------------
 
-    /// Update completion candidates based on current input.
     pub fn update_completions(&mut self) {
         if self.input.starts_with('/') && !self.input.contains(' ') {
             let prefix = &self.input;
@@ -426,7 +591,6 @@ impl App {
                 .filter(|cmd| cmd.starts_with(prefix))
                 .copied()
                 .collect();
-            // Reset selection if candidates changed.
             if self.completions.is_empty() {
                 self.completion_idx = None;
             }
@@ -436,7 +600,6 @@ impl App {
         }
     }
 
-    /// Cycle through completions (Tab when / prefix active).
     pub fn cycle_completion(&mut self) {
         if self.completions.is_empty() {
             return;
@@ -447,10 +610,9 @@ impl App {
         };
         self.completion_idx = Some(idx);
         self.input = self.completions[idx].to_string();
-        self.cursor = self.input.len();
+        self.input_cursor = self.input.len();
     }
 
-    /// Handle a built-in slash command. Returns the command name if handled.
     pub fn handle_slash_command(&mut self) -> Option<SlashResult> {
         let cmd = self.input.trim();
         let result = match cmd {
@@ -465,27 +627,19 @@ impl App {
                 });
                 Some(SlashResult::Handled)
             }
-            "/undo" => {
-                Some(self.undo_last_edit())
-            }
-            _ if cmd.starts_with('/') => {
-                // Unknown slash command — let the agent handle it.
-                None
-            }
+            "/undo" => Some(self.undo_last_edit()),
+            _ if cmd.starts_with('/') => None,
             _ => None,
         };
         if result.is_some() {
             self.input.clear();
-            self.cursor = 0;
+            self.input_cursor = 0;
             self.completions.clear();
             self.completion_idx = None;
         }
         result
     }
 
-    // -- Undo --
-
-    /// Restore the most recent checkpoint (undo last file edit).
     fn undo_last_edit(&mut self) -> SlashResult {
         for block in self.blocks.iter_mut().rev() {
             if let Block::Checkpoint {
@@ -500,7 +654,6 @@ impl App {
                 let file_path = path.clone();
                 let file_content = content.clone();
                 *restored = true;
-
                 match std::fs::write(&file_path, &file_content) {
                     Ok(()) => {
                         self.blocks.push(Block::System {
@@ -523,9 +676,10 @@ impl App {
         SlashResult::Handled
     }
 
-    // -- Clipboard --
+    // -----------------------------------------------------------------------
+    // Clipboard
+    // -----------------------------------------------------------------------
 
-    /// Copy the most recent CodeBlock to the system clipboard.
     pub fn copy_last_code_block(&mut self) {
         let code = self.blocks.iter().rev().find_map(|b| {
             if let Block::CodeBlock { code, .. } = b {
@@ -535,43 +689,21 @@ impl App {
             }
         });
         match code {
-            Some(text) => {
-                match copy_to_clipboard(&text) {
-                    Ok(()) => self.blocks.push(Block::System {
-                        message: "Copied to clipboard.".into(),
-                    }),
-                    Err(e) => self.blocks.push(Block::System {
-                        message: format!("Clipboard error: {e}"),
-                    }),
-                }
-            }
+            Some(text) => match copy_to_clipboard(&text) {
+                Ok(()) => self.blocks.push(Block::System {
+                    message: "Copied to clipboard.".into(),
+                }),
+                Err(e) => self.blocks.push(Block::System {
+                    message: format!("Clipboard error: {e}"),
+                }),
+            },
             None => {
                 self.blocks.push(Block::System {
                     message: "No code block to copy.".into(),
                 });
             }
         }
-        self.scroll_offset = 0;
-    }
-
-    pub fn move_cursor_left(&mut self) {
-        if self.cursor > 0 {
-            self.cursor = self.input[..self.cursor]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-        }
-    }
-
-    pub fn move_cursor_right(&mut self) {
-        if self.cursor < self.input.len() {
-            self.cursor = self.input[self.cursor..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| self.cursor + i)
-                .unwrap_or(self.input.len());
-        }
+        self.scroll.request_auto_scroll();
     }
 }
 
@@ -579,30 +711,17 @@ impl App {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Result of handling a slash command.
-pub enum SlashResult {
-    /// Command was handled internally (no prompt to agent).
-    Handled,
-}
-
-/// Copy text to the system clipboard.
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    // macOS
-    if let Ok(mut child) = Command::new("pbcopy")
-        .stdin(Stdio::piped())
-        .spawn()
-    {
+    if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());
         }
         let _ = child.wait();
         return Ok(());
     }
-
-    // Linux (xclip)
     if let Ok(mut child) = Command::new("xclip")
         .args(["-selection", "clipboard"])
         .stdin(Stdio::piped())
@@ -614,84 +733,9 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
         let _ = child.wait();
         return Ok(());
     }
-
     Err("no clipboard tool found (pbcopy/xclip)".into())
 }
 
-/// Scan the last `AgentText` block for completed fenced code blocks.
-/// Split them into `AgentText` + `CodeBlock` segments, keeping any
-/// incomplete fence (mid-stream) as trailing `AgentText`.
-fn split_code_blocks(blocks: &mut Vec<Block>) {
-    let Some(Block::AgentText { content, streaming }) = blocks.last() else { return };
-
-    // Quick check: does the content even contain a fence?
-    if !content.contains("```") {
-        return;
-    }
-
-    let raw = content.clone();
-    let is_streaming = *streaming;
-    blocks.pop();
-
-    let mut remaining = raw.as_str();
-
-    while let Some(fence_pos) = remaining.find("```") {
-        // Text before the opening fence.
-        let before = &remaining[..fence_pos];
-        if !before.trim().is_empty() {
-            blocks.push(Block::AgentText {
-                content: before.to_string(),
-                streaming: false,
-            });
-        }
-
-        let after_backticks = &remaining[fence_pos + 3..];
-
-        // Extract language from the opening fence line.
-        let lang_end = after_backticks.find('\n').unwrap_or(after_backticks.len());
-        let lang = after_backticks[..lang_end].trim().to_string();
-
-        // Start of code content (after the lang line + newline).
-        let code_start_offset = fence_pos + 3 + lang_end;
-        if code_start_offset >= remaining.len() {
-            // Incomplete fence at very end — keep as text.
-            blocks.push(Block::AgentText {
-                content: remaining[fence_pos..].to_string(),
-                streaming: is_streaming,
-            });
-            remaining = "";
-            break;
-        }
-
-        let code_area = &remaining[code_start_offset + 1..]; // +1 skip newline
-
-        if let Some(close_pos) = code_area.find("```") {
-            let code = code_area[..close_pos].trim_end_matches('\n').to_string();
-            blocks.push(Block::CodeBlock { lang, code });
-
-            // Advance past the closing ```.
-            let after_close = &code_area[close_pos + 3..];
-            remaining = after_close.strip_prefix('\n').unwrap_or(after_close);
-        } else {
-            // No closing fence yet — keep everything from fence_pos as streaming text.
-            blocks.push(Block::AgentText {
-                content: remaining[fence_pos..].to_string(),
-                streaming: is_streaming,
-            });
-            remaining = "";
-            break;
-        }
-    }
-
-    if !remaining.is_empty() {
-        blocks.push(Block::AgentText {
-            content: remaining.to_string(),
-            streaming: is_streaming,
-        });
-    }
-}
-
-/// Extract plain text from ToolCallContent blocks.
 fn extract_text_content(content: &[ToolCallContent]) -> Option<String> {
     let mut text = String::new();
     for item in content {
@@ -700,21 +744,14 @@ fn extract_text_content(content: &[ToolCallContent]) -> Option<String> {
                 text.push_str(&t.text);
             }
         }
-        if let ToolCallContent::Terminal(_) = item {
-            // Terminal content is streamed separately; skip for now.
-        }
     }
     if text.is_empty() { None } else { Some(text) }
 }
 
-/// Extract Diff blocks from ToolCallContent and append them to the block list.
-/// Also creates Checkpoint blocks with original file content for /undo.
 fn extract_diff_blocks(content: &[ToolCallContent], blocks: &mut Vec<Block>) {
     for item in content {
         if let ToolCallContent::Diff(diff) = item {
             let path_str = diff.path.display().to_string();
-
-            // Create a checkpoint with the original file content.
             if let Some(old_text) = &diff.old_text {
                 blocks.push(Block::Checkpoint {
                     path: path_str.clone(),
@@ -722,7 +759,6 @@ fn extract_diff_blocks(content: &[ToolCallContent], blocks: &mut Vec<Block>) {
                     restored: false,
                 });
             }
-
             let mut lines = Vec::new();
             if let Some(old) = &diff.old_text {
                 for line in old.lines() {

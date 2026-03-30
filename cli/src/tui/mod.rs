@@ -1,14 +1,24 @@
 pub mod app;
+mod markdown;
+mod syntax;
 mod ui;
 
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 
-use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event as TermEvent, EventStream, KeyCode, KeyEvent,
+    KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, supports_keyboard_enhancement,
+};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
-use ratatui::DefaultTerminal;
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 
 use app::App;
 use crate::connection::Connection;
@@ -16,61 +26,131 @@ use crate::error::CliError;
 use crate::event::Event as AcpEvent;
 use crate::session::Session;
 
-type PromptFuture<'a> = Pin<Box<dyn Future<Output = Result<agent_client_protocol::StopReason, CliError>> + 'a>>;
+type PromptFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<agent_client_protocol::StopReason, CliError>> + 'a>>;
 
-/// Entry point for the TUI mode.
-///
-/// Takes ownership of the ACP connection handles and event stream.
+// ---------------------------------------------------------------------------
+// Terminal RAII guard
+// ---------------------------------------------------------------------------
+
+struct TerminalGuard {
+    enhanced_keys: bool,
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let mut stdout = io::stdout();
+        if self.enhanced_keys {
+            let _ = crossterm::execute!(
+                stdout,
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                PopKeyboardEnhancementFlags
+            );
+        } else {
+            let _ = crossterm::execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
 pub async fn run(
     conn: &Connection,
     session: &Session,
     event_rx: UnboundedReceiver<AcpEvent>,
 ) -> io::Result<()> {
-    let mut terminal = ratatui::init();
+    // Setup terminal with mouse + enhanced keyboard.
+    crossterm::terminal::enable_raw_mode()?;
+    let mut stdout = io::stdout();
+
+    let enhanced_keys = supports_keyboard_enhancement().unwrap_or(false);
+    if enhanced_keys {
+        crossterm::execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+    } else {
+        crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    }
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let _guard = TerminalGuard { enhanced_keys };
+
     let result = event_loop(&mut terminal, conn, session, event_rx).await;
-    ratatui::restore();
+
+    // Disarm guard — explicit cleanup.
+    std::mem::forget(_guard);
+
+    crossterm::terminal::disable_raw_mode()?;
+    if enhanced_keys {
+        crossterm::execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            PopKeyboardEnhancementFlags
+        )?;
+    } else {
+        crossterm::execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
+    }
+    terminal.show_cursor()?;
+
     result
 }
 
-/// Async event loop (TEA: Update cycle).
-///
-/// Uses `tokio::select!` to multiplex:
-///   - Crossterm terminal events (keyboard)
-///   - ACP events from the agent
-///   - Prompt completion future (when busy)
+// ---------------------------------------------------------------------------
+// Event loop
+// ---------------------------------------------------------------------------
+
 async fn event_loop(
-    terminal: &mut DefaultTerminal,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     conn: &Connection,
     session: &Session,
     mut event_rx: UnboundedReceiver<AcpEvent>,
 ) -> io::Result<()> {
     let mut app = App::new();
     let mut term_events = EventStream::new();
-
-    // Holds the in-flight prompt future (if any).
     let mut prompt_fut: Option<PromptFuture<'_>> = None;
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(80));
 
     loop {
-        // View: render current state.
-        terminal.draw(|frame| ui::draw(frame, &app))?;
+        terminal.draw(|frame| ui::draw(frame, &mut app))?;
 
         if app.should_quit {
             break;
         }
 
         tokio::select! {
-            // Keyboard / terminal events.
             Some(Ok(term_event)) = term_events.next() => {
+                // Scroll events (mouse, PageUp/Down, Shift+arrows).
+                if handle_scroll(&term_event, &mut app) {
+                    continue;
+                }
+
                 if let TermEvent::Key(key) = term_event {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
                     match handle_key(&mut app, key) {
                         KeyAction::Submit(text) if !app.busy => {
                             app.busy = true;
+                            app.spinner.reset();
                             prompt_fut = Some(Box::pin(async move {
                                 session.prompt(conn, &text).await
                             }));
                         }
                         KeyAction::CancelTurn => {
-                            // Drop the prompt future to cancel the turn.
                             prompt_fut = None;
                             app.turn_finished();
                             app.blocks.push(app::Block::System {
@@ -82,12 +162,10 @@ async fn event_loop(
                 }
             }
 
-            // ACP events (agent text, tool calls, permissions, etc.).
             Some(acp_event) = event_rx.next() => {
                 app.handle_acp_event(acp_event);
             }
 
-            // Prompt completion.
             result = async {
                 match prompt_fut.as_mut() {
                     Some(fut) => fut.await,
@@ -112,30 +190,82 @@ async fn event_loop(
                     }
                 }
             }
+
+            // Tick drives spinner animation.
+            _ = tick.tick() => {}
         }
     }
 
     Ok(())
 }
 
-/// Result of handling a key event.
+// ---------------------------------------------------------------------------
+// Scroll handling (mouse + keyboard)
+// ---------------------------------------------------------------------------
+
+fn handle_scroll(event: &TermEvent, app: &mut App) -> bool {
+    match event {
+        TermEvent::Key(KeyEvent {
+            code: KeyCode::PageUp,
+            ..
+        }) => {
+            app.scroll.scroll_up(10);
+            true
+        }
+        TermEvent::Key(KeyEvent {
+            code: KeyCode::PageDown,
+            ..
+        }) => {
+            app.scroll.scroll_down(10);
+            true
+        }
+        TermEvent::Key(KeyEvent {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::SHIFT,
+            ..
+        }) => {
+            app.scroll.scroll_up(1);
+            true
+        }
+        TermEvent::Key(KeyEvent {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::SHIFT,
+            ..
+        }) => {
+            app.scroll.scroll_down(1);
+            true
+        }
+        TermEvent::Mouse(me) => match me.kind {
+            MouseEventKind::ScrollUp => {
+                app.scroll.scroll_up(3);
+                true
+            }
+            MouseEventKind::ScrollDown => {
+                app.scroll.scroll_down(3);
+                true
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Key handling
+// ---------------------------------------------------------------------------
+
 enum KeyAction {
-    /// No special action needed.
     None,
-    /// User submitted text — start a prompt.
     Submit(String),
-    /// User pressed Ctrl+C while busy — cancel the current turn.
     CancelTurn,
 }
 
-/// Map key events to App mutations (TEA: Update).
 fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
-    // If a permission prompt is active, handle permission keys.
+    // Permission mode.
     if app.pending_permission.is_some() {
         match key.code {
             KeyCode::Char(c @ '0'..='9') => {
-                let idx = (c as u8 - b'0') as usize;
-                app.resolve_permission(idx);
+                app.resolve_permission((c as u8 - b'0') as usize);
             }
             KeyCode::Esc => app.cancel_permission(),
             _ => {}
@@ -144,7 +274,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
     }
 
     match (key.modifiers, key.code) {
-        // Ctrl+C: cancel turn if busy, quit if idle.
+        // Quit / Cancel
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             if app.busy {
                 KeyAction::CancelTurn
@@ -153,14 +283,25 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
                 KeyAction::None
             }
         }
-
-        // Ctrl+D: always quit.
         (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
             app.should_quit = true;
             KeyAction::None
         }
 
-        // Tab: slash completion if typing a command, otherwise toggle thinking.
+        // Ctrl+U: clear input
+        (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
+            app.clear_input();
+            app.update_completions();
+            KeyAction::None
+        }
+
+        // Ctrl+Y: copy last code block
+        (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
+            app.copy_last_code_block();
+            KeyAction::None
+        }
+
+        // Tab: slash completion or thinking toggle
         (_, KeyCode::Tab) => {
             if !app.completions.is_empty() {
                 app.cycle_completion();
@@ -170,15 +311,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
             KeyAction::None
         }
 
-        // Ctrl+Y: copy last code block to clipboard.
-        (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
-            app.copy_last_code_block();
+        // Multiline: Shift+Enter or Ctrl+J inserts newline
+        (KeyModifiers::SHIFT, KeyCode::Enter) => {
+            app.insert_newline();
+            KeyAction::None
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
+            app.insert_newline();
             KeyAction::None
         }
 
-        // Submit input
+        // Enter: submit
         (_, KeyCode::Enter) => {
-            // Check for built-in slash commands first.
             if app.input.starts_with('/') {
                 if app.handle_slash_command().is_some() {
                     return KeyAction::None;
@@ -190,31 +334,38 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
             }
         }
 
-        // Input history
-        (_, KeyCode::Up) => { app.history_prev(); KeyAction::None }
-        (_, KeyCode::Down) => { app.history_next(); KeyAction::None }
+        // Input history (only for single-line input — Up/Down in multiline moves cursor)
+        (_, KeyCode::Up) if app.input_line_count() <= 1 => {
+            app.history_prev();
+            KeyAction::None
+        }
+        (_, KeyCode::Down) if app.input_line_count() <= 1 => {
+            app.history_next();
+            KeyAction::None
+        }
 
-        // Text editing
+        // Cursor movement in multiline
+        (_, KeyCode::Up) => { app.cursor_up(); KeyAction::None }
+        (_, KeyCode::Down) => { app.cursor_down(); KeyAction::None }
+
+        // Editing
         (_, KeyCode::Backspace) => {
-            app.delete_char_before_cursor();
+            app.backspace();
             app.update_completions();
             KeyAction::None
         }
-        (_, KeyCode::Left) => { app.move_cursor_left(); KeyAction::None }
-        (_, KeyCode::Right) => { app.move_cursor_right(); KeyAction::None }
+        (_, KeyCode::Delete) => {
+            app.delete_at_cursor();
+            KeyAction::None
+        }
+        (_, KeyCode::Left) => { app.cursor_left(); KeyAction::None }
+        (_, KeyCode::Right) => { app.cursor_right(); KeyAction::None }
+        (_, KeyCode::Home) => { app.cursor_home(); KeyAction::None }
+        (_, KeyCode::End) => { app.cursor_end(); KeyAction::None }
+
         (_, KeyCode::Char(c)) => {
             app.insert_char(c);
             app.update_completions();
-            KeyAction::None
-        }
-
-        // Scroll
-        (_, KeyCode::PageUp) => {
-            app.scroll_offset = app.scroll_offset.saturating_add(5);
-            KeyAction::None
-        }
-        (_, KeyCode::PageDown) => {
-            app.scroll_offset = app.scroll_offset.saturating_sub(5);
             KeyAction::None
         }
 

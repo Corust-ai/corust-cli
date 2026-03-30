@@ -24,3 +24,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+pulldown-cmark.workspace = true
+syntect.workspace = true
+unicode-width.workspace = true
