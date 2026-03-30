@@ -1,0 +1,28 @@
+# Rust
+/target
+**/*.rs.bk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*.iml
+
+# Environment
+.env
+.env.*
