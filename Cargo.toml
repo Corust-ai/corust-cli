@@ -1,5 +1,5 @@
 [workspace]
-members = ["corust_api"]
+members = ["cli"]
 resolver = "2"
 
 [workspace.package]
@@ -9,8 +9,14 @@ license = "MIT"
 authors = ["Corust AI"]
 
 [workspace.dependencies]
+agent-client-protocol = { version = "0.10", features = ["unstable"] }
 async-trait = "0.1"
-base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
