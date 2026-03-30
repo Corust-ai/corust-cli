@@ -41,6 +41,7 @@ impl Client for CliClient {
             }
             SessionUpdate::ToolCall(tool_call) => Some(Event::ToolCallStarted(tool_call)),
             SessionUpdate::ToolCallUpdate(update) => Some(Event::ToolCallUpdated(update)),
+            SessionUpdate::UsageUpdate(usage) => Some(Event::UsageUpdate(usage)),
             _ => None,
         };
 

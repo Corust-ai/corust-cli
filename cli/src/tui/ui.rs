@@ -42,15 +42,9 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         &app.status.model
     };
 
-    let mode_indicator = if app.busy {
-        format!(" {} thinking", app.spinner.frame())
-    } else if app.pending_permission.is_some() {
-        " ⚠ approval needed".to_string()
-    } else {
-        String::new()
-    };
+    let pill_style = Style::default().fg(Color::Black).bg(Color::DarkGray);
 
-    let bar = Paragraph::new(Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!(" {name} "),
             Style::default()
@@ -58,22 +52,99 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!(" {} ", &app.status.cwd),
+    ];
+
+    // Cwd (shortened to last component)
+    let short_cwd = std::path::Path::new(&app.status.cwd)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| app.status.cwd.clone());
+    spans.push(Span::styled(format!(" {short_cwd} "), pill_style));
+
+    // Git branch
+    if let Some(branch) = &app.status.git_branch {
+        spans.push(Span::styled(
+            format!("  {branch} "),
             Style::default().fg(Color::Black).bg(Color::DarkGray),
-        ),
-        Span::styled(
-            format!(" turns: {} ", app.status.turn_count),
-            Style::default().fg(Color::Black).bg(Color::DarkGray),
-        ),
-        Span::styled(
-            mode_indicator,
+        ));
+    }
+
+    // Turn count
+    spans.push(Span::styled(
+        format!(" turns: {} ", app.status.turn_count),
+        pill_style,
+    ));
+
+    // Token usage
+    if app.status.input_tokens > 0 || app.status.output_tokens > 0 {
+        spans.push(Span::styled(
+            format!(
+                " {}↓ {}↑ ",
+                format_tokens(app.status.input_tokens),
+                format_tokens(app.status.output_tokens),
+            ),
+            pill_style,
+        ));
+    }
+
+    // Context window
+    if app.status.context_size > 0 {
+        let pct = (app.status.context_used as f64 / app.status.context_size as f64 * 100.0) as u64;
+        let ctx_color = if pct > 80 {
+            Color::Red
+        } else if pct > 60 {
+            Color::Yellow
+        } else {
+            Color::Black
+        };
+        spans.push(Span::styled(
+            format!(
+                " ctx: {}/{} ({pct}%) ",
+                format_tokens(app.status.context_used),
+                format_tokens(app.status.context_size),
+            ),
+            Style::default().fg(ctx_color).bg(Color::DarkGray),
+        ));
+    }
+
+    // Cost
+    if let Some((amount, ref currency)) = app.status.cost {
+        spans.push(Span::styled(
+            format!(" ${amount:.4} {currency} "),
+            pill_style,
+        ));
+    }
+
+    // Mode indicator (rightmost)
+    if app.busy {
+        spans.push(Span::styled(
+            format!(" {} thinking ", app.spinner.frame()),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
-        ),
-    ]));
+        ));
+    } else if app.pending_permission.is_some() {
+        spans.push(Span::styled(
+            " ⚠ approval needed ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let bar = Paragraph::new(Line::from(spans));
     frame.render_widget(bar, area);
+}
+
+/// Format token counts in human-readable form (e.g. 1.2k, 45.3k).
+fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------

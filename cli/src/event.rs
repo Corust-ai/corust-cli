@@ -1,5 +1,5 @@
 use agent_client_protocol::{
-    PermissionOption, SessionId, SessionModeState, ToolCall, ToolCallUpdate,
+    PermissionOption, SessionId, SessionModeState, ToolCall, ToolCallUpdate, UsageUpdate,
 };
 use futures::channel::oneshot;
 
@@ -41,6 +41,9 @@ pub enum Event {
         agent_name: Option<String>,
         modes: Option<SessionModeState>,
     },
+
+    /// Context window usage update (tokens used/size + cost).
+    UsageUpdate(UsageUpdate),
 
     /// An ACP protocol error occurred (API error, rate limit, etc.).
     Error(String),

@@ -150,6 +150,14 @@ pub struct StatusBar {
     pub cwd: String,
     pub git_branch: Option<String>,
     pub turn_count: usize,
+    /// Cumulative token usage across the session.
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// Context window: tokens used / total size.
+    pub context_used: u64,
+    pub context_size: u64,
+    /// Cumulative cost.
+    pub cost: Option<(f64, String)>,
 }
 
 /// Result of a slash command.
@@ -206,8 +214,13 @@ impl App {
                 cwd: std::env::current_dir()
                     .map(|p| p.display().to_string())
                     .unwrap_or_default(),
-                git_branch: None,
+                git_branch: detect_git_branch(),
                 turn_count: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                context_used: 0,
+                context_size: 0,
+                cost: None,
             },
             spinner: Spinner::new(),
             pending_permission: None,
@@ -327,6 +340,13 @@ impl App {
                 });
                 self.scroll.request_auto_scroll();
             }
+            Event::UsageUpdate(usage) => {
+                self.status.context_used = usage.used;
+                self.status.context_size = usage.size;
+                if let Some(cost) = usage.cost {
+                    self.status.cost = Some((cost.amount, cost.currency));
+                }
+            }
             Event::Error(msg) => {
                 self.blocks.push(Block::System {
                     message: format!("Error: {msg}"),
@@ -377,9 +397,13 @@ impl App {
     // Turn lifecycle
     // -----------------------------------------------------------------------
 
-    pub fn turn_finished(&mut self) {
+    pub fn turn_finished(&mut self, usage: Option<agent_client_protocol::Usage>) {
         self.busy = false;
         self.status.turn_count += 1;
+        if let Some(u) = usage {
+            self.status.input_tokens = u.input_tokens;
+            self.status.output_tokens = u.output_tokens;
+        }
         for block in self.blocks.iter_mut().rev() {
             if let Block::AgentText { streaming, .. } = block {
                 *streaming = false;
@@ -734,6 +758,18 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
         return Ok(());
     }
     Err("no clipboard tool found (pbcopy/xclip)".into())
+}
+
+fn detect_git_branch() -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
 }
 
 fn extract_text_content(content: &[ToolCallContent]) -> Option<String> {

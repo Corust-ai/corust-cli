@@ -96,7 +96,7 @@ async fn run_single(
     let prompt_fut = session.prompt(conn, prompt);
     tokio::pin!(prompt_fut);
 
-    let stop_reason = loop {
+    let (stop_reason, _usage) = loop {
         tokio::select! {
             result = &mut prompt_fut => {
                 drain_events(&mut event_rx);
@@ -151,7 +151,7 @@ async fn run_repl(
         let prompt_fut = session.prompt(conn, input);
         tokio::pin!(prompt_fut);
 
-        let stop_reason = loop {
+        let (stop_reason, _usage) = loop {
             tokio::select! {
                 result = &mut prompt_fut => {
                     drain_events(&mut event_rx);
@@ -259,6 +259,7 @@ fn handle_event(event: Event) {
             let label = agent_name.as_deref().unwrap_or("agent");
             eprintln!("\x1b[2m[session {label} {}]\x1b[0m", session_id.0);
         }
+        Event::UsageUpdate(_) => {} // REPL ignores usage updates
         Event::Error(msg) => {
             eprintln!("\x1b[1;31merror:\x1b[0m {msg}");
         }

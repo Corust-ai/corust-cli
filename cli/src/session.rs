@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use agent_client_protocol::{
     Agent, ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest, ProtocolVersion,
-    SessionId, SessionModeState, StopReason, TextContent,
+    SessionId, SessionModeState, StopReason, TextContent, Usage,
 };
 
 use crate::connection::Connection;
@@ -63,14 +63,19 @@ impl Session {
     }
 
     /// Send a user prompt and wait for the turn to complete.
-    pub async fn prompt(&self, conn: &Connection, text: &str) -> Result<StopReason, CliError> {
+    /// Returns stop reason and optional token usage.
+    pub async fn prompt(
+        &self,
+        conn: &Connection,
+        text: &str,
+    ) -> Result<(StopReason, Option<Usage>), CliError> {
         let request = PromptRequest::new(
             self.session_id.clone(),
             vec![ContentBlock::Text(TextContent::new(text))],
         );
 
         let response = conn.agent.prompt(request).await?;
-        Ok(response.stop_reason)
+        Ok((response.stop_reason, response.usage))
     }
 
     #[allow(dead_code)] // Used by TUI (not yet implemented)

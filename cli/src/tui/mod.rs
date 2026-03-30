@@ -26,8 +26,16 @@ use crate::error::CliError;
 use crate::event::Event as AcpEvent;
 use crate::session::Session;
 
-type PromptFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<agent_client_protocol::StopReason, CliError>> + 'a>>;
+type PromptFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    (agent_client_protocol::StopReason, Option<agent_client_protocol::Usage>),
+                    CliError,
+                >,
+            > + 'a,
+    >,
+>;
 
 // ---------------------------------------------------------------------------
 // Terminal RAII guard
@@ -152,7 +160,7 @@ async fn event_loop(
                         }
                         KeyAction::CancelTurn => {
                             prompt_fut = None;
-                            app.turn_finished();
+                            app.turn_finished(None);
                             app.blocks.push(app::Block::System {
                                 message: "Cancelled.".into(),
                             });
@@ -174,8 +182,8 @@ async fn event_loop(
             } => {
                 prompt_fut = None;
                 match result {
-                    Ok(stop_reason) => {
-                        app.turn_finished();
+                    Ok((stop_reason, usage)) => {
+                        app.turn_finished(usage);
                         if stop_reason != agent_client_protocol::StopReason::EndTurn {
                             app.blocks.push(app::Block::System {
                                 message: format!("Turn ended: {stop_reason:?}"),
@@ -183,7 +191,7 @@ async fn event_loop(
                         }
                     }
                     Err(e) => {
-                        app.turn_finished();
+                        app.turn_finished(None);
                         app.blocks.push(app::Block::System {
                             message: format!("Error: {e}"),
                         });
