@@ -109,21 +109,6 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         spans.push(Span::styled(format!("${amount:.4} {currency}"), dim));
     }
 
-    // Mode indicator
-    if app.busy {
-        spans.push(Span::styled("  ", dim));
-        spans.push(Span::styled(
-            format!("{} thinking", app.spinner.frame()),
-            Style::default().fg(Color::Yellow),
-        ));
-    } else if app.pending_permission.is_some() {
-        spans.push(Span::styled("  ", dim));
-        spans.push(Span::styled(
-            "⚠ approval needed",
-            Style::default().fg(Color::Yellow),
-        ));
-    }
-
     let bar = Paragraph::new(Line::from(spans));
     frame.render_widget(bar, area);
 }
@@ -467,17 +452,19 @@ fn draw_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         return;
     }
 
-    let (title, border_style) = if app.busy {
-        (
-            "Waiting… (Ctrl+C to interrupt)",
-            Style::default().fg(Color::DarkGray),
-        )
-    } else {
-        (
-            "Enter ↵ send • Shift+Enter ↵ newline",
-            Style::default().fg(Color::Cyan),
-        )
-    };
+    if app.busy {
+        let title = format!("{} thinking · Ctrl+C to interrupt", app.spinner.frame());
+        let widget = Paragraph::new("").block(
+            UiBlock::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(title),
+        );
+        frame.render_widget(widget, area);
+        return;
+    }
+
+    let title = "Enter ↵ send · Shift+Enter ↵ newline";
 
     // Build input text with optional completion ghost.
     let mut input_text = app.input.clone();
@@ -489,19 +476,17 @@ fn draw_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let input_widget = Paragraph::new(input_text.as_str()).block(
         UiBlock::default()
             .borders(Borders::ALL)
-            .border_style(border_style)
+            .border_style(Style::default().fg(Color::Cyan))
             .title(title),
     );
     frame.render_widget(input_widget, area);
 
     // Cursor
-    if !app.busy {
-        let (row, col) = app.cursor_row_col();
-        let cursor_x = area.x + 1 + col as u16;
-        let cursor_y = area.y + 1 + row as u16;
-        if cursor_y < area.y + area.height.saturating_sub(1) {
-            frame.set_cursor_position((cursor_x, cursor_y));
-        }
+    let (row, col) = app.cursor_row_col();
+    let cursor_x = area.x + 1 + col as u16;
+    let cursor_y = area.y + 1 + row as u16;
+    if cursor_y < area.y + area.height.saturating_sub(1) {
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 }
 
