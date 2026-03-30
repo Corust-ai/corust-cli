@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as UiBlock, Borders, Paragraph, Wrap};
 
-use super::app::{App, Block, DiffLine};
+use super::app::{App, Block, DiffLine, TaskStatus};
 
 const CODE_BG: Color = Color::Rgb(30, 30, 46);
 
@@ -292,6 +292,50 @@ fn render_block<'a>(block: &'a Block, app: &'a App, lines: &mut Vec<Line<'a>>) {
             }
         }
 
+        Block::AgentQuestion { question, options } => {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "[question] ",
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(question.as_str()),
+            ]));
+            for (i, opt) in options.iter().enumerate() {
+                lines.push(Line::from(Span::styled(
+                    format!("  [{i}] {opt}"),
+                    Style::default().fg(Color::Magenta),
+                )));
+            }
+        }
+
+        Block::BackgroundTask { name, status, .. } => {
+            let (icon, color) = match status {
+                TaskStatus::Queued => ("◌", Color::DarkGray),
+                TaskStatus::Running => ("◐", Color::Yellow),
+                TaskStatus::Done => ("●", Color::Green),
+                TaskStatus::Failed => ("✗", Color::Red),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{icon} "), Style::default().fg(color)),
+                Span::styled("[task] ", Style::default().fg(Color::Cyan)),
+                Span::raw(name.as_str()),
+                Span::styled(
+                    format!(" ({status:?})"),
+                    Style::default().fg(color),
+                ),
+            ]));
+        }
+
+        Block::Checkpoint { path, restored, .. } => {
+            if *restored {
+                lines.push(Line::from(Span::styled(
+                    format!("[checkpoint] {path} (restored)"),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::ITALIC),
+                )));
+            }
+            // Hide un-restored checkpoints — they're bookkeeping, not visual.
+        }
+
         Block::System { message } => {
             lines.push(Line::from(Span::styled(
                 message.as_str(),
@@ -309,7 +353,8 @@ fn render_block<'a>(block: &'a Block, app: &'a App, lines: &mut Vec<Line<'a>>) {
 
 fn draw_input_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let prefix = if app.busy { "… " } else { "> " };
-    let input_line = Line::from(vec![
+
+    let mut input_spans = vec![
         Span::styled(
             prefix,
             Style::default()
@@ -317,9 +362,49 @@ fn draw_input_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(&app.input),
-    ]);
+    ];
 
-    let input_widget = Paragraph::new(input_line)
+    // Show inline completion ghost text.
+    if let Some(idx) = app.completion_idx {
+        if let Some(cmd) = app.completions.get(idx) {
+            if cmd.len() > app.input.len() {
+                input_spans.push(Span::styled(
+                    &cmd[app.input.len()..],
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+        }
+    } else if app.completions.len() == 1 && app.completions[0].len() > app.input.len() {
+        // Single candidate — show ghost text automatically.
+        input_spans.push(Span::styled(
+            &app.completions[0][app.input.len()..],
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let mut text_lines = vec![Line::from(input_spans)];
+
+    // Show completion candidates below input (if multiple).
+    if app.completions.len() > 1 {
+        let comp_spans: Vec<Span> = app
+            .completions
+            .iter()
+            .enumerate()
+            .map(|(i, cmd)| {
+                if Some(i) == app.completion_idx {
+                    Span::styled(
+                        format!(" {cmd} "),
+                        Style::default().fg(Color::Black).bg(Color::Cyan),
+                    )
+                } else {
+                    Span::styled(format!(" {cmd} "), Style::default().fg(Color::DarkGray))
+                }
+            })
+            .collect();
+        text_lines.push(Line::from(comp_spans));
+    }
+
+    let input_widget = Paragraph::new(text_lines)
         .block(UiBlock::default().borders(Borders::TOP));
 
     frame.render_widget(input_widget, area);

@@ -160,14 +160,30 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
             KeyAction::None
         }
 
-        // Tab: toggle thinking block collapse.
+        // Tab: slash completion if typing a command, otherwise toggle thinking.
         (_, KeyCode::Tab) => {
-            app.toggle_thinking();
+            if !app.completions.is_empty() {
+                app.cycle_completion();
+            } else {
+                app.toggle_thinking();
+            }
+            KeyAction::None
+        }
+
+        // Ctrl+Y: copy last code block to clipboard.
+        (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
+            app.copy_last_code_block();
             KeyAction::None
         }
 
         // Submit input
         (_, KeyCode::Enter) => {
+            // Check for built-in slash commands first.
+            if app.input.starts_with('/') {
+                if app.handle_slash_command().is_some() {
+                    return KeyAction::None;
+                }
+            }
             match app.submit_input() {
                 Some(text) => KeyAction::Submit(text),
                 None => KeyAction::None,
@@ -179,10 +195,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
         (_, KeyCode::Down) => { app.history_next(); KeyAction::None }
 
         // Text editing
-        (_, KeyCode::Backspace) => { app.delete_char_before_cursor(); KeyAction::None }
+        (_, KeyCode::Backspace) => {
+            app.delete_char_before_cursor();
+            app.update_completions();
+            KeyAction::None
+        }
         (_, KeyCode::Left) => { app.move_cursor_left(); KeyAction::None }
         (_, KeyCode::Right) => { app.move_cursor_right(); KeyAction::None }
-        (_, KeyCode::Char(c)) => { app.insert_char(c); KeyAction::None }
+        (_, KeyCode::Char(c)) => {
+            app.insert_char(c);
+            app.update_completions();
+            KeyAction::None
+        }
 
         // Scroll
         (_, KeyCode::PageUp) => {

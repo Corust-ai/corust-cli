@@ -30,13 +30,27 @@ pub struct App {
     pub history_cursor: Option<usize>,
     /// Stashed input when browsing history.
     pub history_stash: String,
+    /// Slash command completion candidates (shown when input starts with /).
+    pub completions: Vec<&'static str>,
+    /// Current completion selection index.
+    pub completion_idx: Option<usize>,
 }
+
+/// Built-in slash commands.
+pub const SLASH_COMMANDS: &[&str] = &[
+    "/clear",
+    "/exit",
+    "/model",
+    "/quit",
+    "/undo",
+];
 
 // ---------------------------------------------------------------------------
 // Block model
 // ---------------------------------------------------------------------------
 
 /// A single visual unit in the conversation scroll area.
+#[allow(dead_code)] // P1 variants constructed when ACP events are wired.
 pub enum Block {
     /// User's submitted input.
     UserInput { text: String },
@@ -67,9 +81,31 @@ pub enum Block {
 
     /// Permission request (rendered inline).
     PermissionRequest { title: String, resolved: Option<String> },
+
+    // --- P1 ---
+
+    /// Agent asks a clarifying question, optionally with choices.
+    AgentQuestion { question: String, options: Vec<String> },
+
+    /// Background sub-agent task progress.
+    BackgroundTask { id: String, name: String, status: TaskStatus },
+
+    /// File snapshot before edit; supports /undo.
+    Checkpoint { path: String, content: String, restored: bool },
+}
+
+/// Status of a background task.
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // Used once ACP background task events are wired.
+pub enum TaskStatus {
+    Queued,
+    Running,
+    Done,
+    Failed,
 }
 
 /// A single line within a diff block.
+#[allow(dead_code)] // Context variant used with proper diff algorithms.
 pub enum DiffLine {
     Context(String),
     Add(String),
@@ -119,6 +155,8 @@ impl App {
             history: Vec::new(),
             history_cursor: None,
             history_stash: String::new(),
+            completions: Vec::new(),
+            completion_idx: None,
         }
     }
 
@@ -377,6 +415,145 @@ impl App {
         self.cursor = self.input.len();
     }
 
+    // -- Slash command completion --
+
+    /// Update completion candidates based on current input.
+    pub fn update_completions(&mut self) {
+        if self.input.starts_with('/') && !self.input.contains(' ') {
+            let prefix = &self.input;
+            self.completions = SLASH_COMMANDS
+                .iter()
+                .filter(|cmd| cmd.starts_with(prefix))
+                .copied()
+                .collect();
+            // Reset selection if candidates changed.
+            if self.completions.is_empty() {
+                self.completion_idx = None;
+            }
+        } else {
+            self.completions.clear();
+            self.completion_idx = None;
+        }
+    }
+
+    /// Cycle through completions (Tab when / prefix active).
+    pub fn cycle_completion(&mut self) {
+        if self.completions.is_empty() {
+            return;
+        }
+        let idx = match self.completion_idx {
+            None => 0,
+            Some(i) => (i + 1) % self.completions.len(),
+        };
+        self.completion_idx = Some(idx);
+        self.input = self.completions[idx].to_string();
+        self.cursor = self.input.len();
+    }
+
+    /// Handle a built-in slash command. Returns the command name if handled.
+    pub fn handle_slash_command(&mut self) -> Option<SlashResult> {
+        let cmd = self.input.trim();
+        let result = match cmd {
+            "/quit" | "/exit" => {
+                self.should_quit = true;
+                Some(SlashResult::Handled)
+            }
+            "/clear" => {
+                self.blocks.clear();
+                self.blocks.push(Block::System {
+                    message: "Cleared.".into(),
+                });
+                Some(SlashResult::Handled)
+            }
+            "/undo" => {
+                Some(self.undo_last_edit())
+            }
+            _ if cmd.starts_with('/') => {
+                // Unknown slash command — let the agent handle it.
+                None
+            }
+            _ => None,
+        };
+        if result.is_some() {
+            self.input.clear();
+            self.cursor = 0;
+            self.completions.clear();
+            self.completion_idx = None;
+        }
+        result
+    }
+
+    // -- Undo --
+
+    /// Restore the most recent checkpoint (undo last file edit).
+    fn undo_last_edit(&mut self) -> SlashResult {
+        for block in self.blocks.iter_mut().rev() {
+            if let Block::Checkpoint {
+                path,
+                content,
+                restored,
+            } = block
+            {
+                if *restored {
+                    continue;
+                }
+                let file_path = path.clone();
+                let file_content = content.clone();
+                *restored = true;
+
+                match std::fs::write(&file_path, &file_content) {
+                    Ok(()) => {
+                        self.blocks.push(Block::System {
+                            message: format!("Restored: {file_path}"),
+                        });
+                        return SlashResult::Handled;
+                    }
+                    Err(e) => {
+                        self.blocks.push(Block::System {
+                            message: format!("Undo failed ({file_path}): {e}"),
+                        });
+                        return SlashResult::Handled;
+                    }
+                }
+            }
+        }
+        self.blocks.push(Block::System {
+            message: "Nothing to undo.".into(),
+        });
+        SlashResult::Handled
+    }
+
+    // -- Clipboard --
+
+    /// Copy the most recent CodeBlock to the system clipboard.
+    pub fn copy_last_code_block(&mut self) {
+        let code = self.blocks.iter().rev().find_map(|b| {
+            if let Block::CodeBlock { code, .. } = b {
+                Some(code.clone())
+            } else {
+                None
+            }
+        });
+        match code {
+            Some(text) => {
+                match copy_to_clipboard(&text) {
+                    Ok(()) => self.blocks.push(Block::System {
+                        message: "Copied to clipboard.".into(),
+                    }),
+                    Err(e) => self.blocks.push(Block::System {
+                        message: format!("Clipboard error: {e}"),
+                    }),
+                }
+            }
+            None => {
+                self.blocks.push(Block::System {
+                    message: "No code block to copy.".into(),
+                });
+            }
+        }
+        self.scroll_offset = 0;
+    }
+
     pub fn move_cursor_left(&mut self) {
         if self.cursor > 0 {
             self.cursor = self.input[..self.cursor]
@@ -401,6 +578,45 @@ impl App {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Result of handling a slash command.
+pub enum SlashResult {
+    /// Command was handled internally (no prompt to agent).
+    Handled,
+}
+
+/// Copy text to the system clipboard.
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    // macOS
+    if let Ok(mut child) = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+        return Ok(());
+    }
+
+    // Linux (xclip)
+    if let Ok(mut child) = Command::new("xclip")
+        .args(["-selection", "clipboard"])
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+        return Ok(());
+    }
+
+    Err("no clipboard tool found (pbcopy/xclip)".into())
+}
 
 /// Scan the last `AgentText` block for completed fenced code blocks.
 /// Split them into `AgentText` + `CodeBlock` segments, keeping any
@@ -492,9 +708,21 @@ fn extract_text_content(content: &[ToolCallContent]) -> Option<String> {
 }
 
 /// Extract Diff blocks from ToolCallContent and append them to the block list.
+/// Also creates Checkpoint blocks with original file content for /undo.
 fn extract_diff_blocks(content: &[ToolCallContent], blocks: &mut Vec<Block>) {
     for item in content {
         if let ToolCallContent::Diff(diff) = item {
+            let path_str = diff.path.display().to_string();
+
+            // Create a checkpoint with the original file content.
+            if let Some(old_text) = &diff.old_text {
+                blocks.push(Block::Checkpoint {
+                    path: path_str.clone(),
+                    content: old_text.clone(),
+                    restored: false,
+                });
+            }
+
             let mut lines = Vec::new();
             if let Some(old) = &diff.old_text {
                 for line in old.lines() {
@@ -505,10 +733,7 @@ fn extract_diff_blocks(content: &[ToolCallContent], blocks: &mut Vec<Block>) {
                 lines.push(DiffLine::Add(line.to_string()));
             }
             if !lines.is_empty() {
-                blocks.push(Block::Diff {
-                    path: diff.path.display().to_string(),
-                    lines,
-                });
+                blocks.push(Block::Diff { path: path_str, lines });
             }
         }
     }
