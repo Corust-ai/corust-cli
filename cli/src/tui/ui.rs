@@ -40,7 +40,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let sep = Span::styled(" · ", dim);
 
     let name = if app.status.model.is_empty() {
-        "corust"
+        "corust-cli"
     } else {
         &app.status.model
     };

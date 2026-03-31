@@ -1,13 +1,13 @@
 [package]
-name = "corust"
-description = "Corust CLI — an ACP client for the Corust agent."
+name = "corust-cli"
+description = "corust-cli — an ACP client for the Corust agent."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
 [[bin]]
-name = "corust"
+name = "corust-cli"
 path = "src/main.rs"
 
 [dependencies]
