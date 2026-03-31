@@ -20,8 +20,8 @@ use session::Session;
 
 #[derive(Parser)]
 #[command(
-    name = "corust",
-    about = "Corust CLI — an ACP client for the Corust agent"
+    name = "corust-cli",
+    about = "corust-cli — an ACP client for the Corust agent"
 )]
 struct Cli {
     /// Working directory for the session.
