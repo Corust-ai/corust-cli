@@ -1,28 +1,13 @@
-# Rust
-/target
-**/*.rs.bk
-
-# macOS
+# OS
 .DS_Store
-.AppleDouble
-.LSOverride
-._*
-
-# Windows
 Thumbs.db
-ehthumbs.db
-Desktop.ini
 
-# Linux
-*~
-
-# IDEs
+# Editors
 .idea/
 .vscode/
 *.swp
 *.swo
-*.iml
 
-# Environment
+# Local secrets
 .env
 .env.*

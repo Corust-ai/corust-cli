@@ -1,27 +1,35 @@
-# Contributing to corust-cli
+# Contributing
 
-Thanks for your interest in contributing!
+This repository contains the installer script (`install.sh`), the issue
+tracker, and distribution docs for the Corust CLI. **CLI source code lives in a
+separate repository** and is not accepted here.
 
-## Getting started
+## Reporting bugs or requesting features
 
-1. Fork the repository
-2. Clone your fork and create a branch:
-   ```bash
-   git checkout -b my-feature
-   ```
-3. Make your changes and ensure they build:
-   ```bash
-   cargo build
-   cargo clippy
-   ```
-4. Open a pull request
+Open an issue using the
+[issue templates](https://github.com/Corust-ai/corust-cli/issues/new/choose).
+Please include:
 
-## Guidelines
+- The version reported by `corust --version`
+- Your OS and architecture (output of `uname -sm`)
+- Steps to reproduce
 
-- Follow existing code style — run `cargo fmt` before committing.
-- Keep PRs focused. One feature or fix per PR.
-- Add a clear description of what your PR does and why.
+## Contributing to `install.sh`
 
-## Reporting issues
+Pull requests that fix installer bugs or improve platform support are welcome.
 
-Use the [issue templates](https://github.com/anthropics/corust-cli/issues/new/choose) to report bugs or request features.
+1. Fork the repository and create a branch.
+2. Test your changes locally on at least macOS and Linux.
+3. Verify the script is POSIX-compliant by running it with `dash` or
+   `checkbashisms`.
+4. Open a pull request with a clear description.
+
+## Contributing to the CLI itself
+
+Source changes (features, bug fixes, refactors) should be proposed in the main
+CLI repository. If you're unsure where that is, open an issue here and we'll
+point you in the right direction.
+
+## Updating docs
+
+README changes and clarifications are welcome via PR.

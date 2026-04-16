@@ -1,77 +1,135 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+# Corust CLI installer
+#
+# Usage:
+#   curl --proto '=https' --tlsv1.2 -sSf https://corust.ai/install.sh | sh
+#
+# Environment variables:
+#   CORUST_VERSION   pin to a specific tag (e.g. v0.4.2). Default: latest
+#   INSTALL_DIR      override install prefix. Default: $HOME/.local/bin
 
-REPO="Corust-ai/corust-cli"
-INSTALL_DIR="${CORUST_INSTALL_DIR:-$HOME/.corust/bin}"
+set -eu
 
-# Detect platform
-detect_target() {
-  local os arch
-  os="$(uname -s)"
-  arch="$(uname -m)"
+REPO="Corust-ai/homebrew-cli"
+BIN_NAME="corust"
 
-  case "$os" in
-    Linux)  os="unknown-linux-gnu" ;;
-    Darwin) os="apple-darwin" ;;
-    *)      echo "Error: unsupported OS: $os" >&2; exit 1 ;;
-  esac
+# ── output helpers ───────────────────────────────────────────────────────────
 
-  case "$arch" in
-    x86_64|amd64)  arch="x86_64" ;;
-    arm64|aarch64) arch="aarch64" ;;
-    *)             echo "Error: unsupported architecture: $arch" >&2; exit 1 ;;
-  esac
+info()  { printf '\033[1;34m%s\033[0m\n' "$*"; }
+warn()  { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
+error() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
-  echo "${arch}-${os}"
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || error "need '$1' (command not found)"
 }
 
-# Fetch the latest release tag from GitHub
+# ── platform detection ───────────────────────────────────────────────────────
+
+detect_platform() {
+    os="$(uname -s)"
+    arch="$(uname -m)"
+
+    case "$os" in
+        Linux*)  os="linux"  ;;
+        Darwin*) os="darwin" ;;
+        *)       error "unsupported OS: $os (this installer supports Linux and macOS)" ;;
+    esac
+
+    case "$arch" in
+        x86_64|amd64)  arch="x64"   ;;
+        aarch64|arm64) arch="arm64" ;;
+        *)             error "unsupported architecture: $arch" ;;
+    esac
+
+    # Linux arm64 builds are not published yet.
+    if [ "$os" = "linux" ] && [ "$arch" = "arm64" ]; then
+        error "linux arm64 is not yet supported — see https://github.com/${REPO}/releases"
+    fi
+
+    echo "${os}-${arch}"
+}
+
+# ── resolve version ──────────────────────────────────────────────────────────
+
 latest_version() {
-  curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-    | grep '"tag_name"' \
-    | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/'
+    url="https://api.github.com/repos/${REPO}/releases/latest"
+    tag="$(
+        curl --proto '=https' --tlsv1.2 -fsSL "$url" \
+            | grep '"tag_name"' \
+            | head -n1 \
+            | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'
+    )"
+    [ -n "$tag" ] || error "failed to determine latest release from ${REPO}"
+    echo "$tag"
 }
+
+# ── install directory ────────────────────────────────────────────────────────
+
+resolve_install_dir() {
+    if [ -n "${INSTALL_DIR:-}" ]; then
+        echo "$INSTALL_DIR"
+        return
+    fi
+    if mkdir -p "$HOME/.local/bin" 2>/dev/null; then
+        echo "$HOME/.local/bin"
+    else
+        echo "/usr/local/bin"
+    fi
+}
+
+warn_if_not_in_path() {
+    dir="$1"
+    case ":$PATH:" in
+        *":${dir}:"*) ;;
+        *)
+            echo
+            echo "  ${dir} is not in your \$PATH."
+            echo "  Add this line to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
+            echo
+            echo "    export PATH=\"${dir}:\$PATH\""
+            echo
+            ;;
+    esac
+}
+
+# ── main ─────────────────────────────────────────────────────────────────────
 
 main() {
-  local version="${1:-}"
-  if [ -z "$version" ]; then
-    echo "Fetching latest release..."
-    version="$(latest_version)"
-  fi
+    need_cmd uname
+    need_cmd curl
+    need_cmd tar
+    need_cmd install
 
-  local target
-  target="$(detect_target)"
+    platform="$(detect_platform)"
+    version="${CORUST_VERSION:-$(latest_version)}"
+    asset="cli-${platform}.tar.gz"
+    url="https://github.com/${REPO}/releases/download/${version}/${asset}"
+    install_dir="$(resolve_install_dir)"
 
-  local archive="corust-${version}-${target}.tar.gz"
-  local url="https://github.com/${REPO}/releases/download/${version}/${archive}"
+    info "Installing Corust CLI ${version} (${platform})"
+    echo "  from: ${url}"
+    echo "  to:   ${install_dir}/${BIN_NAME}"
+    echo
 
-  echo "Downloading ${archive}..."
-  local tmp
-  tmp="$(mktemp -d)"
-  curl -fsSL "$url" -o "${tmp}/${archive}"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
 
-  echo "Extracting to ${INSTALL_DIR}..."
-  mkdir -p "$INSTALL_DIR"
-  tar xzf "${tmp}/${archive}" -C "$tmp"
-  cp "${tmp}/corust-${version}-${target}/corust-cli" "$INSTALL_DIR/"
-  cp "${tmp}/corust-${version}-${target}/corust-agent-acp" "$INSTALL_DIR/"
-  rm -rf "$tmp"
+    curl --proto '=https' --tlsv1.2 -fSL --progress-bar "$url" -o "${tmp}/${asset}" \
+        || error "download failed — version '${version}' may not exist for platform '${platform}'"
 
-  chmod +x "${INSTALL_DIR}/corust-cli" "${INSTALL_DIR}/corust-agent-acp"
+    tar -xzf "${tmp}/${asset}" -C "$tmp"
 
-  echo ""
-  echo "Installed corust-cli and corust-agent-acp to ${INSTALL_DIR}"
+    if [ ! -f "${tmp}/${BIN_NAME}" ]; then
+        error "archive did not contain expected binary '${BIN_NAME}'"
+    fi
 
-  # Check if INSTALL_DIR is in PATH
-  if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
-    echo ""
-    echo "Add the following to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-    echo ""
-    echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
-  fi
+    install -m 755 "${tmp}/${BIN_NAME}" "${install_dir}/${BIN_NAME}"
 
-  echo ""
-  echo "Run 'corust-cli --help' to get started."
+    echo
+    info "Installed: ${install_dir}/${BIN_NAME}"
+    "${install_dir}/${BIN_NAME}" --version 2>/dev/null || true
+
+    warn_if_not_in_path "$install_dir"
 }
 
 main "$@"

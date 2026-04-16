@@ -1,65 +1,73 @@
 # corust-cli
 
-A terminal UI client for the [Corust](https://corust.ai) agent, built on the [Agent Client Protocol (ACP)](https://github.com/anthropics/agent-client-protocol).
+Installer and distribution channel for the **Corust CLI**, a terminal UI client
+for the [Corust](https://corust.ai) agent.
 
-## Features
-
-- Full TUI experience powered by [Ratatui](https://ratatui.rs)
-- Markdown rendering with syntax highlighting
-- Streaming agent responses
+> Source code lives in a separate repository. This repo only hosts the
+> installer script, issue tracker, and release assets.
 
 ## Installation
 
 ### Quick install (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Corust-ai/corust-cli/main/install.sh | bash
+curl --proto '=https' --tlsv1.2 -sSf https://corust.ai/install.sh | sh
 ```
 
-Or install a specific version:
+Pin to a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Corust-ai/corust-cli/main/install.sh | bash -s v0.1.0
+CORUST_VERSION=v0.4.2 curl --proto '=https' --tlsv1.2 -sSf https://corust.ai/install.sh | sh
 ```
 
-### Download from releases
-
-Pre-built binaries for macOS and Linux are available on the [Releases](https://github.com/Corust-ai/corust-cli/releases) page.
-
-### From source
-
-Requires Rust 2024 edition (1.85+).
+Install to a custom location:
 
 ```bash
-cargo install --path cli
+INSTALL_DIR=/opt/bin curl --proto '=https' --tlsv1.2 -sSf https://corust.ai/install.sh | sh
 ```
 
-Note: building from source only installs `corust-cli`. You also need the `corust-agent-acp` binary — place it in the same directory as `corust-cli`, or set `CORUST_ACP_BIN` to its path.
+### Homebrew (macOS / Linux)
+
+```bash
+brew install Corust-ai/cli/corust
+```
+
+### Manual download
+
+Pre-built binaries for macOS (arm64, x64) and Linux (x64) are available on the
+[Releases page](https://github.com/Corust-ai/homebrew-cli/releases).
 
 ## Usage
 
 ```bash
-corust-cli
+corust            # launch interactive TUI
+corust exec "..."  # non-interactive mode
+corust sessions    # list saved sessions
+corust resume      # resume most recent session
 ```
 
-Options:
+Run `corust --help` for all options.
 
-| Flag | Description |
-|------|-------------|
-| `-C, --project-dir <DIR>` | Set the working directory for the session |
-| `--server-bin <PATH>` | Path to the corust-agent-acp binary |
-| `-e, --exec <PROMPT>` | Non-interactive mode: execute a single prompt and exit |
-| `-t, --tui` | Launch the TUI instead of the line-based REPL |
-
-## Development
+## Uninstall
 
 ```bash
-# Build
-cargo build
-
-# Run
-cargo run -p corust-cli
+rm "$(command -v corust)"
 ```
+
+## Supported platforms
+
+| OS      | Architecture | Status |
+|---------|--------------|--------|
+| macOS   | arm64        | ✅ |
+| macOS   | x86_64       | ✅ |
+| Linux   | x86_64       | ✅ |
+| Linux   | arm64        | ❌ (planned) |
+| Windows | x86_64       | ❌ (use manual download) |
+
+## Issues & feature requests
+
+Please file bugs and feature requests on this repository's
+[issue tracker](https://github.com/Corust-ai/corust-cli/issues/new/choose).
 
 ## License
 
